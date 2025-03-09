@@ -6,71 +6,9 @@ from ultralytics.yolo.utils import DEFAULT_CONFIG, ROOT, ops
 from ultralytics.yolo.utils.checks import check_imgsz
 from ultralytics.yolo.utils.plotting import Annotator, colors, save_one_box
 from paddleocr import PaddleOCR
-from spellchecker import SpellChecker
-
-# Import Gemini API
-import google.generativeai as genai
-import os
-
-# --------------------- API KEY WARNING ---------------------
-# WARNING: Hardcoding your API key directly in the code is NOT recommended for production.
-# It is insecure and can expose your key.
-# For this demonstration, we are using it as requested, but for real applications:
-# 1. Set GOOGLE_API_KEY environment variable (recommended - as shown previously).
-# 2. Use a more secure method to manage secrets (like cloud secret management services).
-# ------------------------------------------------------------
-
-# Configure Gemini API
-GEMINI_API_KEY = "AIzaSyAV4XpiOKS2hXA9ood2-kObGhldgxeV7lc" # Directly using the provided API key - FOR DEMO ONLY
-#  Uncomment below lines and comment the line above to use environment variable (Recommended)
-# GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY")
-# if GEMINI_API_KEY is None:
-#     raise EnvironmentError("Please set the GOOGLE_API_KEY environment variable or hardcode it (DEV ONLY - INSECURE).")
-
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-pro')
 
 # Initialize PaddleOCR reader with the latest model
 reader = PaddleOCR(model_type='PP-OCRv3', use_gpu=True, lang='en')
-
-# Initialize spell checker (keeping it for potential fallback or comparison)
-spell = SpellChecker()
-
-def correct_text_spellchecker(text): # Renamed to differentiate
-    words = text.split()
-    corrected_words = []
-    for word in words:
-        if spell.unknown([word]):
-            corrected_word = spell.correction(word)
-            corrected_words.append(corrected_word if corrected_word else word)
-        else:
-            corrected_words.append(word)
-    return ' '.join(corrected_words)
-
-def correct_text_gemini(text):
-    """Corrects text using Gemini Pro for improved OCR accuracy."""
-    if not text.strip():  # Handle empty text to avoid Gemini API calls
-        return ""
-
-    prompt_parts = [
-        "Please perform advanced text correction on the following OCR output to fix spelling, grammar, and improve readability, ensuring the meaning is preserved. Focus on making the text as accurate and natural as possible:\n",
-        text,
-        "\nEnsure the corrected text is highly accurate and reflects proper English." # Added stronger instruction for accuracy
-    ]
-
-    try:
-        response = model.generate_content(prompt_parts)
-        response.resolve() # Wait for response to be fully available
-        corrected_text = response.text
-        if corrected_text:
-            return corrected_text
-        else:
-            print("Gemini returned empty correction, falling back to SpellChecker.")
-            return correct_text_spellchecker(text) # Fallback to spellchecker if Gemini fails
-    except Exception as e:
-        print(f"Error during Gemini correction: {e}. Falling back to SpellChecker. Error: {e}")
-        return correct_text_spellchecker(text) # Fallback to spellchecker on error
-
 
 def getOCR(im, coors):
     x, y, w, h = int(coors[0]), int(coors[1]), int(coors[2]), int(coors[3])
@@ -78,27 +16,23 @@ def getOCR(im, coors):
     conf = 0.2
 
     gray = cv2.cvtColor(im, cv2.COLOR_RGB2GRAY)
+    results = reader.ocr(gray, cls=True)
 
-    # --- Enhanced PaddleOCR Configuration (Optional, but can improve accuracy) ---
-    # You can experiment with these parameters to potentially boost PaddleOCR's initial results.
-    # For example, increasing `det_db_unclip_ratio` might help with detecting slightly overlapping text.
-    # `rec_image_shape` can be adjusted if you know the typical aspect ratio of your text.
-    # Experiment with these, or remove if default PaddleOCR is preferred.
-    # results = reader.ocr(gray, cls=True, det_db_unclip_ratio=2.0, rec_image_shape='3x32x192')
-    # -----------------------------------------------------------------------------
+    # Filter results with confidence > conf
+    valid_results = [res for res in results[0] if res['confidence'] > conf]
 
-    results = reader.ocr(gray, cls=True) # Using default PaddleOCR settings for now
-
-    if results:
-        results_sorted = sorted(results, key=lambda x: x['confidence'], reverse=True)
-        if results_sorted and results_sorted[0]['confidence'] > conf: # Check if results_sorted is not empty
-            ocr = results_sorted[0]['text']
-        else:
-            ocr = ""
+    # Sort by the minimum y-coordinate of the bounding box points
+    if valid_results:
+        def get_min_y(res):
+            rect = res['rect']
+            y_values = [point[1] for point in rect]
+            return min(y_values)
+        valid_results_sorted = sorted(valid_results, key=get_min_y)
+        combined_text = ' '.join(res['text'] for res in valid_results_sorted)
     else:
-        ocr = ""
+        combined_text = ""
 
-    return str(ocr)
+    return str(combined_text)
 
 class DetectionPredictor(BasePredictor):
 
@@ -120,7 +54,7 @@ class DetectionPredictor(BasePredictor):
 
         for i, pred in enumerate(preds):
             shape = orig_img[i].shape if self.webcam else orig_img.shape
-            pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], shape).round()
+            pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, 4], shape).round()
 
         return preds
 
@@ -138,6 +72,7 @@ class DetectionPredictor(BasePredictor):
             frame = getattr(self.dataset, 'frame', 0)
 
         self.data_path = p
+        # save_path = str(self.save_dir / p.name)  # im.jpg
         self.txt_path = str(self.save_dir / 'labels' / p.stem) + ('' if self.dataset.mode == 'image' else f'_{frame}')
         log_string += '%gx%g ' % im.shape[2:]  # print string
         self.annotator = self.get_annotator(im0)
@@ -164,8 +99,7 @@ class DetectionPredictor(BasePredictor):
                     self.model.names[c] if self.args.hide_conf else f'{self.model.names[c]} {conf:.2f}')
                 ocr = getOCR(im0, xyxy)
                 if ocr:
-                    corrected_ocr = correct_text_gemini(ocr) # Use Gemini for enhanced text correction
-                    label = corrected_ocr
+                    label = ocr
                 self.annotator.box_label(xyxy, label, color=colors(c, True))
             if self.args.save_crops:
                 imc = im0.copy()
