@@ -6,9 +6,24 @@ from ultralytics.yolo.utils import DEFAULT_CONFIG, ROOT, ops
 from ultralytics.yolo.utils.checks import check_imgsz
 from ultralytics.yolo.utils.plotting import Annotator, colors, save_one_box
 from paddleocr import PaddleOCR
+from spellchecker import SpellChecker
 
 # Initialize PaddleOCR reader with the latest model
 reader = PaddleOCR(model_type='PP-OCRv3', use_gpu=True, lang='en')
+
+# Initialize spell checker
+spell = SpellChecker()
+
+def correct_text(text):
+    words = text.split()
+    corrected_words = []
+    for word in words:
+        if spell.unknown([word]):
+            corrected_word = spell.correction(word)
+            corrected_words.append(corrected_word if corrected_word else word)
+        else:
+            corrected_words.append(word)
+    return ' '.join(corrected_words)
 
 def getOCR(im, coors):
     x, y, w, h = int(coors[0]), int(coors[1]), int(coors[2]), int(coors[3])
@@ -18,17 +33,17 @@ def getOCR(im, coors):
     gray = cv2.cvtColor(im, cv2.COLOR_RGB2GRAY)
     results = reader.ocr(gray, cls=True)
 
-    # Filter results with confidence > conf
-    valid_results = [res for res in results[0] if res['confidence'] > conf]
-
-    # Sort by the minimum y-coordinate of the bounding box points
-    if valid_results:
-        def get_min_y(res):
-            rect = res['rect']
-            y_values = [point[1] for point in rect]
-            return min(y_values)
-        valid_results_sorted = sorted(valid_results, key=get_min_y)
-        combined_text = ' '.join(res['text'] for res in valid_results_sorted)
+    # Handle multiple lines by collecting all valid text detections
+    if results and len(results[0]) > 0:
+        valid_results = [res for res in results[0] if res[1] > conf]  # res[1] is confidence
+        if valid_results:
+            # Sort by the minimum y-coordinate of the bounding box
+            def get_min_y(res):
+                return min([point[1] for point in res[0]])  # res[0] is the bounding box points
+            valid_results_sorted = sorted(valid_results, key=get_min_y)
+            combined_text = ' '.join(res[0] for res in valid_results_sorted)  # res[0] is the text
+        else:
+            combined_text = ""
     else:
         combined_text = ""
 
@@ -53,14 +68,8 @@ class DetectionPredictor(BasePredictor):
                                         max_det=self.args.max_det)
 
         for i, pred in enumerate(preds):
-            if len(pred) == 0:  # Skip if no detections
-                continue
             shape = orig_img[i].shape if self.webcam else orig_img.shape
-            # Ensure pred has at least 5 columns (x1, y1, x2, y2, conf, cls)
-            if pred.shape[1] >= 5:
-                pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], shape).round()
-            else:
-                print(f"Warning: Prediction shape {pred.shape} is unexpected, skipping scaling.")
+            pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], shape).round()
 
         return preds
 
@@ -94,7 +103,7 @@ class DetectionPredictor(BasePredictor):
         gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
         for *xyxy, conf, cls in reversed(det):
             if self.args.save_txt:  # Write to file
-                xywh = (ops.xyxy2xywh( torch.from_np(np.array(xyxy)).view(1, 4) / gn )).view(-1).to_list()  # normalized xywh
+                xywh = (ops.xyxy2xywh(torch.from_numpy(np.array(xyxy)).view(1, 4) / gn)).view(-1).tolist()  # normalized xywh
                 line = (cls, *xywh, conf) if self.args.save_conf else (cls, *xywh)  # label format
                 with open(f'{self.txt_path}.txt', 'a') as f:
                     f.write(('%g ' * len(line)).rstrip() % line + '\n')
@@ -105,7 +114,8 @@ class DetectionPredictor(BasePredictor):
                     self.model.names[c] if self.args.hide_conf else f'{self.model.names[c]} {conf:.2f}')
                 ocr = getOCR(im0, xyxy)
                 if ocr:
-                    label = ocr
+                    corrected_ocr = correct_text(ocr)
+                    label = corrected_ocr
                 self.annotator.box_label(xyxy, label, color=colors(c, True))
             if self.args.save_crops:
                 imc = im0.copy()
