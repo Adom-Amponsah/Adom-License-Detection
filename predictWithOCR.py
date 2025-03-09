@@ -1,15 +1,18 @@
 import hydra
 import torch
 import cv2
+import numpy as np
 from ultralytics.yolo.engine.predictor import BasePredictor
 from ultralytics.yolo.utils import DEFAULT_CONFIG, ROOT, ops
 from ultralytics.yolo.utils.checks import check_imgsz
 from ultralytics.yolo.utils.plotting import Annotator, colors, save_one_box
-from paddleocr import PaddleOCR
+from google.cloud import vision
 from spellchecker import SpellChecker
 
-# Initialize PaddleOCR reader with the latest model
-reader = PaddleOCR(model_type='PP-OCRv3', use_gpu=True, lang='en')
+# Initialize Google Cloud Vision client (replace with your API key or JSON credentials path)
+import os
+os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = 'AIzaSyDLoloIXFnio5NG-9wGUak8RU-Lhc1cusw'  # Insert your API key or path to JSON file
+client = vision.ImageAnnotatorClient()
 
 # Initialize spell checker
 spell = SpellChecker()
@@ -30,24 +33,28 @@ def getOCR(im, coors):
     im = im[y:h, x:w]
     conf = 0.2
 
-    gray = cv2.cvtColor(im, cv2.COLOR_RGB2GRAY)
-    results = reader.ocr(gray, cls=True)
+    # Convert image to bytes for Google Cloud Vision API
+    success, encoded_image = cv2.imencode('.jpg', im)
+    if not success:
+        return ""
 
-    # Handle multiple lines by collecting all valid text detections
-    if results and len(results[0]) > 0:
-        valid_results = [res for res in results[0] if res[1] > conf]  # res[1] is confidence
-        if valid_results:
-            # Sort by the minimum y-coordinate of the bounding box
-            def get_min_y(res):
-                return min([point[1] for point in res[0]])  # res[0] is the bounding box points
-            valid_results_sorted = sorted(valid_results, key=get_min_y)
-            combined_text = ' '.join(res[0] for res in valid_results_sorted)  # res[0] is the text
-        else:
-            combined_text = ""
-    else:
-        combined_text = ""
+    content = encoded_image.tobytes()
+    image = vision.Image(content=content)
 
-    return str(combined_text)
+    # Perform OCR using Google Cloud Vision API
+    response = client.text_detection(image=image)
+    texts = response.text_annotations
+
+    if texts:
+        # Combine all detected lines into a single string with spaces
+        # Skip the first entry (full text), use individual lines to capture multi-line text
+        lines = [text.description for text in texts[1:]]
+        combined_text = ' '.join(lines)
+        # Simple confidence check: Ensure we have at least one detection
+        # Google Cloud Vision API doesn't provide per-text confidence in this response
+        if combined_text:
+            return combined_text
+    return ""
 
 class DetectionPredictor(BasePredictor):
 
