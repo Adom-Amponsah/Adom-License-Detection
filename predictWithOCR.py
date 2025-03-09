@@ -53,8 +53,14 @@ class DetectionPredictor(BasePredictor):
                                         max_det=self.args.max_det)
 
         for i, pred in enumerate(preds):
+            if len(pred) == 0:  # Skip if no detections
+                continue
             shape = orig_img[i].shape if self.webcam else orig_img.shape
-            pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, 4], shape).round()
+            # Ensure pred has at least 5 columns (x1, y1, x2, y2, conf, cls)
+            if pred.shape[1] >= 5:
+                pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], shape).round()
+            else:
+                print(f"Warning: Prediction shape {pred.shape} is unexpected, skipping scaling.")
 
         return preds
 
